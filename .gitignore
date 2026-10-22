@@ -1,0 +1,41 @@
+# Python and local development
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated labs and test workspaces
+/generated/
+/GENERATED_SOLUTIONS/
+.test-*/
+.timing-check-*/
+.pkse-check-*/
+/tmp/
+
+# Runtime records and secrets (including custom output directories)
+data/
+keys/
+encrypted/
+hashes/
+signature/
+public_key/
+metadata/
+add/
+index.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
