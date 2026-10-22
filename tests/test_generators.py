@@ -62,189 +62,71 @@ class SocketGeneratorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(dir=ROOT, prefix=".test-")
-        cls.folder = generate_socket_solution.create_solution("Test election", Path(cls.temporary.name) / "lab", search="PKSE")
-        cls.common = module("common", cls.folder / "common.py")
-        cls.setup = module("socket_setup", cls.folder / "setup.py")
+        cls.folder = generate_socket_solution.create_solution(
+            "Test election", Path(cls.temporary.name) / "lab", candidates=["A", "B", "C"])
+        cls.server_source = (cls.folder / "server.py").read_text(encoding="utf-8")
+        cls.client_source = (cls.folder / "client.py").read_text(encoding="utf-8")
         cls.server = module("socket_server", cls.folder / "server.py")
         cls.client = module("socket_client", cls.folder / "client.py")
-        cls.tsa = module("socket_tsa", cls.folder / "timestamp_server.py")
-        cls.authority = module("socket_authority", cls.folder / "authority.py")
-        cls.config = cls.common.load(cls.folder / "config.json")
-        cls.accounts = {"admin": {"role": "admin", "password": "admin-password"},
-                        "auditor": {"role": "auditor", "password": "auditor-password"},
-                        **{f"voter{i}": {"role": "voter", "password": f"voter{i}-password"} for i in range(1, 4)}}
-        # Tests use small keys for speed; the CLI always uses 4096/2048/2048.
-        cls.public = cls.setup.create_setup(cls.config, cls.accounts, ["trustee-one", "trustee-two"],
-                                            rsa_bits=1024, paillier_bits=512, signature_bits=256)
-        cls.initial = cls.common.load(cls.common.DATA / "server" / "state.json")
-        cls.tsa_key = cls.common.RSA.import_key((cls.common.DATA / "tsa" / "private.pem").read_bytes())
 
     @classmethod
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
     def setUp(self):
-        self.common.save(self.common.DATA / "server" / "state.json", copy.deepcopy(self.initial))
-        self.election = self.server.Election()
+        self.server.save(self.server.BALLOTS_PATH, [])
+        self.server.SERVER_STATE["accepted_count"] = 0
 
-    def payload(self, user, operation, **kwargs):
-        return {"username": user, "password": self.accounts[user]["password"], "operation": operation, **kwargs}
+    def submit(self, candidate="B", constituency="North"):
+        packet = self.client.prepare_vote(candidate, constituency, self.client.PUBLIC,
+                                           self.client.CLIENT_SIGNING_KEY)
+        private_key = self.server.RSA.import_key(self.server.SERVER_RSA_PRIVATE_PEM)
+        return self.server.verify_and_store({"operation": "submit", **packet}, self.server.PUBLIC, private_key)
 
-    def ballot(self, user="voter1", candidate=0, constituency="North"):
-        signing = self.common.unlock(self.common.load(self.common.DATA / "voters" / f"{user}.json"), self.accounts[user]["password"])
-        packet, _ = self.client.prepare_ballot(self.public, user, signing, candidate, constituency)
-        ticket = self.tsa.issue_ticket({"digest": self.common.digest(packet)}, self.tsa_key)
-        return {"packet": packet, "timestamp": ticket}
+    def test_generator_emits_two_role_files_and_embeds_keys(self):
+        self.assertEqual({path.name for path in self.folder.glob("*.py")}, {"server.py", "client.py"})
+        compile(self.server_source, "server.py", "exec")
+        compile(self.client_source, "client.py", "exec")
+        self.assertIn("SERVER_RSA_PRIVATE_PEM", self.server_source)
+        self.assertNotIn("SERVER_RSA_PRIVATE_PEM", self.client_source)
+        self.assertIn("CLIENT_SIGNING_KEY", self.client_source)
+        self.assertNotIn("CLIENT_SIGNING_KEY", self.server_source)
 
-    def exchange(self, handler, invoke):
-        errors = []
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            listener.listen(1)
-            listener.settimeout(10)
-            port = listener.getsockname()[1]
+    def test_ballot_verification_storage_search_and_homomorphic_tally(self):
+        receipt = self.submit()
+        self.assertTrue(receipt["verified"])
+        stored = self.server.load_ballots()
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["constituency_id"], "North")
+        self.assertNotIn("candidate_id", stored[0])
 
-            def serve():
-                try:
-                    connection, _ = listener.accept()
-                    with connection:
-                        handler(connection)
-                except Exception as exc:
-                    errors.append(exc)
+        results = self.server.search_ballots({"constituency_id": "North"})
+        self.assertEqual(results["count"], 1)
+        self.assertEqual(len(self.server.search_ballots({"constituency_id": "South"})["ballots"]), 0)
+        self.assertEqual(self.server.search_ballots({"constituency_id": "North",
+                                                     "start_date": "2099-01-01"})["count"], 1)
 
-            thread = threading.Thread(target=serve)
-            thread.start()
-            try:
-                result = invoke(port)
-            finally:
-                thread.join(12)
-            self.assertFalse(thread.is_alive())
-            self.assertEqual(errors, [])
-            return result
+        tally = self.server.tally_votes({"constituency_id": "North"}, self.server.PUBLIC,
+                                        self.server.PAILLIER_PRIVATE_KEY)
+        self.assertEqual(tally["total"], 1)
+        self.assertEqual(tally["counts"], {"A": 0, "B": 1, "C": 0})
 
-    def test_real_socket_submission_and_tsa(self):
-        ballot = self.ballot()
-        ticket = self.exchange(
-            lambda conn: self.common.send(conn, self.tsa.issue_ticket(self.common.receive(conn), self.tsa_key)),
-            lambda port: self.common.get_timestamp(dict(self.config, tsa_port=port), self.public, ballot["packet"]))
-        ballot["timestamp"] = ticket
-        result = self.exchange(lambda conn: self.server.handle_connection(conn, self.election),
-            lambda port: self.common.request(dict(self.config, port=port), self.public,
-                self.payload("voter1", "cast", ballot=ballot)))
-        self.assertIn("verified_at", result["receipt"])
-        self.common.rsa_verify(self.election.key.publickey(), result["receipt"], result["signature"])
-        reloaded = self.server.Election()
-        self.assertEqual(len(reloaded.state["ballots"]), 1)
-        with self.assertRaises(ValueError):
-            reloaded.dispatch(self.payload("voter1", "cast", ballot=ballot))
+    def test_tampering_and_generator_validation(self):
+        packet = self.client.prepare_vote("A", "North", self.client.PUBLIC,
+                                          self.client.CLIENT_SIGNING_KEY)
+        packet["encrypted"]["ciphertext"] = "00"
+        private_key = self.server.RSA.import_key(self.server.SERVER_RSA_PRIVATE_PEM)
+        with self.assertRaises((ValueError, KeyError, TypeError)):
+            self.server.verify_and_store({"operation": "submit", **packet}, self.server.PUBLIC, private_key)
+        self.assertEqual(self.server.load_ballots(), [])
 
-    def test_roles_tampering_and_timestamps(self):
-        for invalid in ([], {}, {"username": "voter1", "password": [], "operation": "status"}):
-            with self.assertRaises(ValueError):
-                self.election.dispatch(invalid)
-        with self.assertRaises(ValueError):
-            self.election.dispatch(dict(self.payload("admin", "status"), password="wrong"))
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("voter1", "search", constituency="North"))
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("auditor", "close"))
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("admin", "close"))
-        ballot = self.ballot()
-        bad = copy.deepcopy(ballot)
-        bad["packet"]["hash"] = "0" * 128
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("voter1", "cast", ballot=bad))
-        bad = copy.deepcopy(ballot)
-        bad["timestamp"]["body"]["issued_at"] = "2099-01-01T00:00:00+00:00"
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("voter1", "cast", ballot=bad))
-        bad["timestamp"]["signature"] = self.common.rsa_sign(self.tsa_key, bad["timestamp"]["body"])
-        with self.assertRaises(ValueError):
-            self.election.dispatch(self.payload("voter1", "cast", ballot=bad))
-        self.assertEqual(self.election.state["ballots"], [])
-
-    def test_search_and_encrypted_storage(self):
-        self.election.dispatch(self.payload("voter1", "cast", ballot=self.ballot()))
-        results = self.election.dispatch(self.payload("auditor", "search", constituency="NORTH"))
-        self.assertEqual(len(results), 1)
-        self.assertEqual(set(results[0]), {"ballot_id", "constituency", "submitted_at"})
-        self.assertEqual(self.election.search("South"), [])
-        self.assertEqual(len(self.election.search("", self.public["opens_at"], self.public["closes_at"])), 1)
-        # Exercise the SSE index path as well as the PKSE preset.
-        self.election.search_rsa = None
-        entry = self.election.make_index_entry("id", "North", results[0]["submitted_at"])
-        self.assertEqual(self.election.read_index_entry(entry)["constituency"], "north")
-        stored = self.common.canonical(self.election.state).decode()
-        self.assertNotIn('"candidate":', stored)
-        self.assertNotIn('"randomizers":', stored)
-        self.assertNotIn('"constituency":', stored)
-        self.election.state["ballots"][0]["ballot"]["packet"]["hash"] = "0" * 128
-        with self.assertRaises(ValueError):
-            self.election.verify_saved(self.election.state["ballots"][0])
-
-    def test_signed_but_inconsistent_vote_is_rejected(self):
-        ballot = self.ballot()
-        n = int(self.public["paillier_n"])
-        ballot["packet"]["votes"][0] = str(self.common.paillier_encrypt(9, n)[0])
-        signing = self.common.unlock(self.common.load(self.common.DATA / "voters" / "voter1.json"), "voter1-password")
-        unsigned = {k: v for k, v in ballot["packet"].items() if k != "envelope_signature"}
-        ballot["packet"]["envelope_signature"] = self.common.elgamal_sign(self.common.digest(unsigned), signing)
-        ballot["timestamp"] = self.tsa.issue_ticket({"digest": self.common.digest(ballot["packet"])}, self.tsa_key)
-        with self.assertRaisesRegex(ValueError, "tally vector"):
-            self.election.dispatch(self.payload("voter1", "cast", ballot=ballot))
-        self.assertEqual(self.election.state["ballots"], [])
-
-    def test_sse_audit_and_deadline(self):
-        self.election.search_rsa = None
-        self.election.dispatch(self.payload("voter1", "cast", ballot=self.ballot()))
-        self.assertEqual(len(self.election.search("north")), 1)
-        self.assertEqual(self.election.search("south"), [])
-        after_deadline = self.common.parse_time(self.public["closes_at"]) + timedelta(seconds=1)
-        with patch.object(self.server, "now", return_value=after_deadline):
-            with self.assertRaisesRegex(ValueError, "outside"):
-                self.election.dispatch(self.payload("voter2", "cast", ballot=self.ballot("voter2")))
-
-    def test_two_authority_tally(self):
-        for user, candidate in (("voter1", 0), ("voter2", 1), ("voter3", 0)):
-            self.election.dispatch(self.payload(user, "cast", ballot=self.ballot(user, candidate)))
-        after_deadline = self.common.parse_time(self.public["closes_at"]) + timedelta(seconds=1)
-        with patch.object(self.server, "now", return_value=after_deadline), patch.object(self.server, "stamp", return_value=after_deadline.isoformat()):
-            manifest = self.election.close()
-        partials = []
-        with patch.object(self.authority, "now", return_value=after_deadline):
-            for number, password in ((1, "trustee-one"), (2, "trustee-two")):
-                share = self.common.load(self.common.DATA / "authorities" / f"{number}.json")
-                partials.append(self.authority.partial_decrypt(self.public, manifest, share, password))
-        with self.assertRaises(ValueError):
-            self.election.finalize(partials[:1])
-        with self.assertRaises(ValueError):
-            self.election.finalize([partials[0], partials[0]])
-        corrupted = copy.deepcopy(partials)
-        corrupted[0]["body"]["values"][0] = "1"
-        with self.assertRaises(ValueError):
-            self.election.finalize(corrupted)
-        result = self.election.finalize(partials)
-        self.assertEqual(list(result["counts"].values()), [2, 1, 0])
-        self.assertEqual(result["total"], 3)
-
-    def test_framing_and_generator_validation(self):
-        class Frame:
-            def __init__(self, data):
-                self.data = io.BytesIO(data)
-
-            def recv(self, size):
-                return self.data.read(min(size, 1))
-
-        with self.assertRaises(ValueError):
-            self.common.receive(Frame(struct.pack("!I", self.common.MAX_FRAME + 1)))
-        value = self.common.canonical({"message": "fragmented"})
-        self.assertEqual(self.common.receive(Frame(struct.pack("!I", len(value)) + value)), {"message": "fragmented"})
         with self.assertRaises(FileExistsError):
             generate_socket_solution.create_solution("Again", self.folder)
         with self.assertRaises(ValueError):
-            generate_socket_solution.create_solution("Bad", self.folder / "bad", port=8765, tsa_port=8765)
+            generate_socket_solution.create_solution("Bad", self.folder.parent / "bad",
+                                                     port=8765, candidates=["same", "same"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
