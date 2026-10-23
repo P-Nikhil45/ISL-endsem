@@ -4,6 +4,8 @@ Generate runnable Python lab programs instead of navigating hundreds of prebuilt
 
 **Start with [`generate_solution.py`](generate_solution.py)** for a single-computer, file-based lab. Use [`generate_socket_solution.py`](generate_socket_solution.py) for a menu-driven encrypted client/server voting demo.
 
+For a separate educational variant with voter login and authority-assisted aggregate decryption, use [`generate_authenticated_socket_solution.py`](generate_authenticated_socket_solution.py). It generates a third authority role file and leaves the original socket generator available.
+
 ## Quick start
 
 Python **3.10+** is required. The generators use the standard library; generated cryptography programs need PyCryptodome.
@@ -56,6 +58,8 @@ cd generated/voting_demo
 
 The generated folder contains only `server.py` and `client.py`. The generator lets you choose candidate IDs and ballot encryption (AES-128/192/256, DES, Triple-DES), hash (SHA256, SHA512, SHA1, MD5, CUSTOM32), and signature (RSA, ElGamal, Schnorr). It embeds fixed demonstration keys from `templates/socket/hardcoded_keys.json`, keeping server private keys in `server.py` and the client signing key in `client.py`.
 
+The authenticated variant uses `templates/authenticated_socket/` and generates `server.py`, `client.py`, and `authority.py`. Voter accounts use salted PBKDF2 password verifiers; Paillier decryption requires both the server and authority shares. Its authority can run as a background watcher and automatically approve signed aggregates. See that template folder's README for the tally workflow and educational limits.
+
 Install PyCryptodome into the active virtual environment before running the generated programs:
 
 ```sh
@@ -74,7 +78,7 @@ In the other terminal, run the client:
 python client.py
 ```
 
-The client menu lets you cast a vote, search ballot receipts by constituency ID, tally votes for a constituency, or check server status. The server creates its ballot storage file when first run, verifies ballot hashes and signatures, and homomorphically adds encrypted candidate votes. Candidate selections remain encrypted in storage; the server can still decrypt individual votes because it holds the Paillier private key. Ballot timestamps are retained, but search filters only by constituency ID. See the [socket walkthrough](templates/socket/README.md) for limitations and run steps.
+The client menu lets you cast a vote, search ballot receipts by constituency ID, tally votes for a constituency, or check server status. The original server creates ballot storage when first run, verifies ballot hashes and signatures, and homomorphically adds encrypted candidate votes. Candidate selections remain encrypted in storage, but that original server holds the Paillier private key and can decrypt individual votes. See the [socket walkthrough](templates/socket/README.md) for its limitations and run steps.
 
 ## Repository layout
 
@@ -114,4 +118,4 @@ The socket template includes fixed demonstration private keys, which are copied 
 
 ## Scope
 
-These are educational cryptography demonstrations, **not production security**. The socket demo has no voter login or account management. The generated client source contains the client signing key, and the generated server source contains the server transport and Paillier private keys. Keep those role files private and distribute them only to their intended roles. The server sees constituency and receipt time, and its Paillier key can decrypt individual candidate selections.
+These are educational cryptography demonstrations, **not production security**. The original socket demo has no voter login and its server can decrypt individual stored votes. The authenticated variant adds self-registration and requires an authority share to decrypt an aggregate, but it does not verify real-world voter eligibility or provide production threshold Paillier. Keep generated role files private and distribute them only to their intended roles. The server sees constituency and receipt time during ballot processing.

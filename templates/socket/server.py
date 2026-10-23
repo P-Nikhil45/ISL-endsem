@@ -10,6 +10,9 @@ def load_ballots():
     values = load(BALLOTS_PATH)
     if not isinstance(values, list):
         raise ValueError("Ballot storage is invalid.")
+    for ballot in values:
+        if "constituency_index" not in ballot and isinstance(ballot.get("constituency_id"), str):
+            ballot["constituency_index"] = constituency_index(ballot.pop("constituency_id"))
     return values
 
 
@@ -46,7 +49,9 @@ def verify_and_store(packet, public, server_key):
     if any(item.get("ballot_id") == ballot_id for item in ballots):
         raise ValueError("Duplicate ballot receipt.")
     received_at = stamp()
-    record = {**ballot, "hash": actual_hash, "received_at": received_at}
+    record = {key: value for key, value in ballot.items() if key != "constituency_id"}
+    record.update({"constituency_index": constituency_index(constituency),
+                   "hash": actual_hash, "received_at": received_at})
     ballots.append(record)
     save(BALLOTS_PATH, ballots)
     SERVER_STATE["accepted_count"] = len(ballots)
@@ -54,30 +59,36 @@ def verify_and_store(packet, public, server_key):
     return {"verified": True, "ballot_id": ballot_id, "received_at": received_at, "hash": actual_hash}
 
 
-def search_ballots(query):
-    constituency = query.get("constituency_id", "").strip()
-    if not constituency:
+def search_ballots(query, server_key=None):
+    token = query.get("constituency_token")
+    if token is None and query.get("constituency_id", "").strip():
+        # Compatibility for local callers and older clients; network clients send tokens.
+        token = constituency_index(query["constituency_id"])
+    if not isinstance(token, str) or len(token) != 64:
         raise ValueError("Enter a constituency ID to search.")
     matches = []
     for ballot in load_ballots():
-        if ballot["constituency_id"] != constituency:
+        if not hmac.compare_digest(ballot.get("constituency_index", ""), token):
             continue
         matches.append({"ballot_id": ballot["ballot_id"], "timestamp": ballot["received_at"],
                         "hash": ballot["hash"]})
     return {"count": len(matches), "ballots": matches}
 
 
-def tally_votes(query, public, paillier_private):
-    constituency = query.get("constituency_id", "").strip()
-    if not constituency:
+def tally_votes(query, public, paillier_private, server_key=None):
+    token = query.get("constituency_token")
+    if token is None and query.get("constituency_id", "").strip():
+        token = constituency_index(query["constituency_id"])
+    if not isinstance(token, str) or len(token) != 64:
         raise ValueError("Enter a constituency ID to tally.")
-    ballots = [ballot for ballot in load_ballots() if ballot["constituency_id"] == constituency]
+    ballots = [ballot for ballot in load_ballots()
+               if hmac.compare_digest(ballot.get("constituency_index", ""), token)]
     candidates = public["candidate_ids"]
     totals = []
     for index, candidate in enumerate(candidates):
         encrypted_total = paillier_add([ballot["encrypted_votes"][index] for ballot in ballots], public["paillier"])
         totals.append((candidate, paillier_decrypt(encrypted_total, paillier_private)))
-    return {"constituency_id": constituency, "total": len(ballots),
+    return {"total": len(ballots),
             "counts": {candidate: count for candidate, count in totals}}
 
 
@@ -91,9 +102,9 @@ def handle_connection(connection, public, server_key, paillier_private):
         if operation == "submit":
             result = verify_and_store(payload, public, server_key)
         elif operation == "search":
-            result = search_ballots(payload)
+            result = search_ballots(payload, server_key)
         elif operation == "tally":
-            result = tally_votes(payload, public, paillier_private)
+            result = tally_votes(payload, public, paillier_private, server_key)
         elif operation == "status":
             result = {"accepted_count": len(load_ballots())}
         else:

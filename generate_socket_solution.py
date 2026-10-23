@@ -1,6 +1,7 @@
 """Generate an encrypted client/server voting demo with selectable algorithms."""
 import argparse
 import ast
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -59,7 +60,9 @@ def create_key_material(selected, config):
     return {"public": public,
             "server_rsa_private": keys["server_rsa_private"],
             "paillier_private": keys["paillier_private"],
-            "client_signing_private": signature_keys["private"]}
+            "client_signing_private": signature_keys["private"],
+            "search_index_key": hashlib.sha256(
+                ("constituency-index-v1:" + keys["server_rsa_private"]).encode("utf-8")).hexdigest()}
 
 
 def generate_sources(selected, config, key_material=None):
@@ -74,6 +77,7 @@ def generate_sources(selected, config, key_material=None):
         "SYMMETRIC_ALGORITHM = CRYPTO['symmetric']\n"
         "HASH_ALGORITHM = CRYPTO['hash']\n"
         "SIGNATURE_ALGORITHM = CRYPTO['signature']\n"
+        "SEARCH_INDEX_KEY = " + repr(key_material["search_index_key"]) + "\n"
     )
     public_source = "PUBLIC = " + repr(key_material["public"]) + "\n"
     sig_constants = selected_signature_constants(selected["signature"])

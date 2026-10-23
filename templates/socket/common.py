@@ -97,6 +97,12 @@ def hash_bytes(data):
     return algorithms[HASH_ALGORITHM](data).hexdigest()
 
 
+def constituency_index(value):
+    """Build the deterministic HMAC token used by the searchable index."""
+    normalized = value.strip().casefold().encode("utf-8")
+    return hmac.new(bytes.fromhex(SEARCH_INDEX_KEY), normalized, hashlib.sha256).hexdigest()
+
+
 def seal(key, plaintext):
     cipher = AES.new(key, AES.MODE_GCM)
     ciphertext, tag = cipher.encrypt_and_digest(plaintext)

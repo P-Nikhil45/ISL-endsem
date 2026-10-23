@@ -53,13 +53,16 @@ def main():
             elif choice == "2":
                 constituency_id = input("Constituency ID: ").strip()
                 result = request(config, public,
-                                 {"operation": "search", "constituency_id": constituency_id})
+                                 {"operation": "search",
+                                  "constituency_token": constituency_index(constituency_id)})
                 print("Matching ballots:", result["count"])
                 for item in result["ballots"]:
                     print(item["ballot_id"], item["timestamp"], "hash:", item["hash"])
             elif choice == "3":
                 constituency_id = input("Constituency ID to tally: ").strip()
-                result = request(config, public, {"operation": "tally", "constituency_id": constituency_id})
+                result = request(config, public,
+                                 {"operation": "tally",
+                                  "constituency_token": constituency_index(constituency_id)})
                 print("Verified votes:", result["total"])
                 for candidate, count in result["counts"].items():
                     print(f"Candidate {candidate}: {count}")
